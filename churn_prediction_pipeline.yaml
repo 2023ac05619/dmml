@@ -2,36 +2,28 @@
 # Name: customer-churn-prediction-pipeline
 # Description: A pipeline to perform customer churn prediction.
 # Inputs:
-#    url: str
+#    api_endpoint: str
+#    input_csv: str
+#    sql_details: dict
 components:
-  comp-download-operation:
-    executorLabel: exec-download-operation
+  comp-data-ingestion:
+    executorLabel: exec-data-ingestion
     inputDefinitions:
       parameters:
-        url:
+        api_endpoint:
           parameterType: STRING
-    outputDefinitions:
-      artifacts:
-        data_path:
-          artifactType:
-            schemaTitle: system.Dataset
-            schemaVersion: 0.0.1
-  comp-ingestion-operation:
-    executorLabel: exec-ingestion-operation
-    inputDefinitions:
-      artifacts:
         input_csv:
-          artifactType:
-            schemaTitle: system.Dataset
-            schemaVersion: 0.0.1
+          parameterType: STRING
+        sql_details:
+          parameterType: STRUCT
     outputDefinitions:
       artifacts:
         output_csv:
           artifactType:
             schemaTitle: system.Dataset
             schemaVersion: 0.0.1
-  comp-processing-operation:
-    executorLabel: exec-processing-operation
+  comp-data-processing:
+    executorLabel: exec-data-processing
     inputDefinitions:
       artifacts:
         input_csv:
@@ -48,8 +40,8 @@ components:
           artifactType:
             schemaTitle: system.Dataset
             schemaVersion: 0.0.1
-  comp-training-operation:
-    executorLabel: exec-training-operation
+  comp-model-training:
+    executorLabel: exec-model-training
     inputDefinitions:
       artifacts:
         processed_X:
@@ -76,13 +68,13 @@ components:
             schemaVersion: 0.0.1
 deploymentSpec:
   executors:
-    exec-download-operation:
+    exec-data-ingestion:
       container:
         args:
         - --executor_input
         - '{{$}}'
         - --function_to_execute
-        - download_operation
+        - data_ingestion
         command:
         - sh
         - -c
@@ -91,49 +83,7 @@ deploymentSpec:
           \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
           \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
           \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.3'\
-          \ 'requests==2.32.3' 'minio==7.2.15' && \"$0\" \"$@\"\n"
-        - sh
-        - -ec
-        - 'program_path=$(mktemp -d)
-
-
-          printf "%s" "$0" > "$program_path/ephemeral_component.py"
-
-          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
-
-          '
-        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
-          \ *\n\ndef download_operation(url: str, data_path: OutputPath('Dataset'))\
-          \ -> None:\n    import requests\n    import pandas as pd\n\n    if url !=\
-          \ '':\n        # Pull object from MINIO\n        response = requests.get(url)\n\
-          \        response.raise_for_status()\n        from io import StringIO\n\
-          \        df = pd.read_csv(StringIO(response.text), header=0, sep=\";\")\n\
-          \    else:        \n        from minio import Minio\n        # MinIO client\
-          \ setup\n        minio_client = Minio(\n            endpoint=\"192.168.203.181:30900\"\
-          , \n            access_key=\"minioadmin\", \n            secret_key=\"minioadmin\"\
-          , \n            secure=False\n        )    \n        # Get the object and\
-          \ save locally\n        minio_client.fget_object(\n            bucket_name=\"\
-          datasets\", \n            object_name=\"customer_churn_dataset-testing-copy.csv\"\
-          ,\n            file_path=\"/tmp/dataset.csv\"\n        )    \n        #\
-          \ Use the downloaded CSV file for data ingestion\n        df = pd.read_csv(\"\
-          /tmp/dataset.csv\")\n\n    if not df.empty:\n        print(\"Data Description\
-          \ => \",df.describe())\n        df.to_csv(data_path, index=False)\n\n"
-        image: python:3.11
-    exec-ingestion-operation:
-      container:
-        args:
-        - --executor_input
-        - '{{$}}'
-        - --function_to_execute
-        - ingestion_operation
-        command:
-        - sh
-        - -c
-        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
-          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
-          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
-          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
-          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.3'\
+          \ 'requests==2.32.3' 'minio==7.2.15' 'sqlalchemy==2.0.38' 'pymysql==1.1.1'\
           \ && \"$0\" \"$@\"\n"
         - sh
         - -ec
@@ -146,20 +96,60 @@ deploymentSpec:
 
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
-          \ *\n\ndef ingestion_operation(input_csv: InputPath('Dataset'), output_csv:\
-          \ OutputPath('Dataset')) -> None:\n        import pandas as pd\n       \
-          \ # Simulate loading data from CSV file located at a known path\n      \
-          \  # input_csv='customer_churn_dataset-testing-master.csv'\n        df =\
-          \ pd.read_csv(input_csv)\n        df.describe()\n        df.to_csv(output_csv,\
-          \ index=False)\n\n"
+          \ *\n\ndef data_ingestion(input_csv: str, api_endpoint: str, sql_details:\
+          \ dict, output_csv: OutputPath('Dataset')) -> None:\n    import requests\n\
+          \    import pandas as pd\n    from sqlalchemy import create_engine\n   \
+          \ from minio import Minio\n    from io import StringIO\n\n    # Starting\
+          \ with an empty DataFrame\n    df = pd.DataFrame()  \n\n    # From API\n\
+          \    if api_endpoint:          \n        # Send a GET Request and handle\
+          \ Error\n        try:\n            response = requests.get(api_endpoint)\
+          \ \n        except Exception as e:\n            print(f\"An error occurred\
+          \ while sending GET request to {api_endpoint}: {e}\")\n\n        # If there's\
+          \ a response, then load it into Datafrom    \n        if response:  \n \
+          \           response.raise_for_status()\n            df_api = pd.DataFrame()\n\
+          \            df_api = pd.DataFrame(response.json())\n            if not\
+          \ df_api.empty:\n                print(\"Data from API => \", df_api.describe())\n\
+          \                # Merge all Dataframes into one\n                df = df_api\
+          \ if df.empty else pd.merge(df, df_api, on='key', how='inner') \n\n\n  \
+          \  # From SQL\n    if sql_details: \n        df_db = pd.DataFrame()    \
+          \    \n        # Create a SQL engine for connection\n        engine = create_engine(sql_details['connection_string'],\
+          \ \n                               pool_size=10,\n                     \
+          \          max_overflow=20, \n                               pool_timeout=30,\
+          \ \n                               pool_recycle=1800, \n               \
+          \                pool_pre_ping=True)\n\n        # Run query to capture the\
+          \ data and handle Errors\n        try:\n            df_db = pd.read_sql(sql_details['query'],\
+          \ engine)\n        except Exception as e:\n            print(f\"An error\
+          \ occurred while querying the Database: {e}\") \n\n        if not df_db.empty:\n\
+          \            print(\"Data from Database => \", df_db.describe())\n     \
+          \       # Merge all Dataframes into one\n            df = df_db if df.empty\
+          \ else pd.merge(df, df_db, on='key', how='inner') \n\n\n\n    # From CSV\
+          \ file (via Minio)\n    if input_csv:\n        df_minio = pd.DataFrame()\n\
+          \        downloaded_file = ''\n\n        # Create a minio client connection\n\
+          \        minio_client = Minio(endpoint=\"192.168.203.181:30900\",\n    \
+          \                         access_key=\"minioadmin\",\n                 \
+          \            secret_key=\"minioadmin\",\n                             secure=False)\
+          \        \n\n        # Download the Object and handle Errors\n        try:\n\
+          \            minio_client.fget_object(bucket_name=\"datasets\", \n     \
+          \                                object_name=input_csv,\n              \
+          \                       file_path='/tmp/dataset.csv')\n            downloaded_file\
+          \ = '/tmp/dataset.csv'\n        except Exception as e:\n               \
+          \ print(f\"An error occurred while downloading the file {input_csv}: {e}\"\
+          )\n\n        # If the CSV file is downloaded then load it into Datafrom\
+          \    \n        if downloaded_file:   \n            df_minio = pd.read_csv(downloaded_file)\n\
+          \            if not df_minio.empty:\n                print(\"Data from Minio\
+          \ => \", df_minio.describe())\n                # Merge all Dataframes into\
+          \ one\n                df = df_minio if df.empty else pd.merge(df, df_minio,\
+          \ on='key', how='inner')\n\n\n    if not df.empty:\n        df.reset_index(drop=True,\
+          \ inplace=True)\n        df.to_csv(output_csv, index=False)\n        print(\"\
+          Downloaded Data => \", df.describe())\n\n"
         image: python:3.11
-    exec-processing-operation:
+    exec-data-processing:
       container:
         args:
         - --executor_input
         - '{{$}}'
         - --function_to_execute
-        - processing_operation
+        - data_processing
         command:
         - sh
         - -c
@@ -180,7 +170,7 @@ deploymentSpec:
 
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
-          \ *\n\ndef processing_operation(input_csv: InputPath('Dataset'), processed_X:\
+          \ *\n\ndef data_processing(input_csv: InputPath('Dataset'), processed_X:\
           \ OutputPath('Dataset'), processed_y: OutputPath('Dataset')) -> None:\n\
           \    import pandas as pd\n    from sklearn.preprocessing import StandardScaler\n\
           \    from sklearn.feature_selection import SelectKBest, f_classif\n    from\
@@ -211,13 +201,13 @@ deploymentSpec:
           \ index=False)\n    pd.Series(y_selected).to_csv(processed_y, index=False)\n\
           \n"
         image: python:3.11
-    exec-training-operation:
+    exec-model-training:
       container:
         args:
         - --executor_input
         - '{{$}}'
         - --function_to_execute
-        - training_operation
+        - model_training
         command:
         - sh
         - -c
@@ -238,7 +228,7 @@ deploymentSpec:
 
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
-          \ *\n\ndef training_operation(processed_X: InputPath('Dataset'), processed_y:\
+          \ *\n\ndef model_training(processed_X: InputPath('Dataset'), processed_y:\
           \ InputPath('Dataset'), \n                      knn_model: OutputPath('Dataset'),\
           \ lg_model: OutputPath('Dataset'), svm_model: OutputPath('Dataset')) ->\
           \ None:\n    import pandas as pd\n    from sklearn.model_selection import\
@@ -272,69 +262,62 @@ pipelineInfo:
 root:
   dag:
     tasks:
-      download-operation:
+      data-ingestion:
         cachingOptions:
           enableCache: true
         componentRef:
-          name: comp-download-operation
+          name: comp-data-ingestion
         inputs:
           parameters:
-            url:
-              componentInputParameter: url
-        taskInfo:
-          name: download-operation
-      ingestion-operation:
-        cachingOptions:
-          enableCache: true
-        componentRef:
-          name: comp-ingestion-operation
-        dependentTasks:
-        - download-operation
-        inputs:
-          artifacts:
+            api_endpoint:
+              componentInputParameter: api_endpoint
             input_csv:
-              taskOutputArtifact:
-                outputArtifactKey: data_path
-                producerTask: download-operation
+              componentInputParameter: input_csv
+            sql_details:
+              componentInputParameter: sql_details
         taskInfo:
-          name: ingestion-operation
-      processing-operation:
+          name: data-ingestion
+      data-processing:
         cachingOptions:
           enableCache: true
         componentRef:
-          name: comp-processing-operation
+          name: comp-data-processing
         dependentTasks:
-        - ingestion-operation
+        - data-ingestion
         inputs:
           artifacts:
             input_csv:
               taskOutputArtifact:
                 outputArtifactKey: output_csv
-                producerTask: ingestion-operation
+                producerTask: data-ingestion
         taskInfo:
-          name: processing-operation
-      training-operation:
+          name: data-processing
+      model-training:
         cachingOptions:
           enableCache: true
         componentRef:
-          name: comp-training-operation
+          name: comp-model-training
         dependentTasks:
-        - processing-operation
+        - data-processing
         inputs:
           artifacts:
             processed_X:
               taskOutputArtifact:
                 outputArtifactKey: processed_X
-                producerTask: processing-operation
+                producerTask: data-processing
             processed_y:
               taskOutputArtifact:
                 outputArtifactKey: processed_y
-                producerTask: processing-operation
+                producerTask: data-processing
         taskInfo:
-          name: training-operation
+          name: model-training
   inputDefinitions:
     parameters:
-      url:
+      api_endpoint:
         parameterType: STRING
+      input_csv:
+        parameterType: STRING
+      sql_details:
+        parameterType: STRUCT
 schemaVersion: 2.1.0
 sdkVersion: kfp-2.7.0
