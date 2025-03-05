@@ -6,6 +6,24 @@
 #    input_csv: str
 #    sql_details: dict
 components:
+  comp-data-eda:
+    executorLabel: exec-data-eda
+    inputDefinitions:
+      artifacts:
+        input_csv:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+    outputDefinitions:
+      artifacts:
+        eda:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        plot:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
   comp-data-ingestion:
     executorLabel: exec-data-ingestion
     inputDefinitions:
@@ -68,6 +86,60 @@ components:
             schemaVersion: 0.0.1
 deploymentSpec:
   executors:
+    exec-data-eda:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - data_eda
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.3'\
+          \ 'matplotlib==3.10.0' 'seaborn==0.13.2' 'ydata-profiling==4.12.2' 'urllib3==1.26.20'\
+          \ && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef data_eda(input_csv: InputPath('Dataset'), eda: OutputPath('Dataset'),\
+          \ plot: OutputPath('Dataset')) -> None:\n    import os\n    import pandas\
+          \ as pd\n    import matplotlib.pyplot as plt\n    import seaborn as sns\n\
+          \    from ydata_profiling import ProfileReport\n    import logging\n   \
+          \ import shutil\n    # import joblib\n\n    logging.basicConfig(level=logging.INFO)\n\
+          \    logger = logging.getLogger(__name__)\n\n    # Read the input dataset\n\
+          \    df = pd.read_csv(input_csv)\n    base_dir = os.path.abspath(os.path.dirname(__file__))\n\
+          \    eda_path = os.path.join(base_dir, \"eda\")\n    plot_path = os.path.join(base_dir,\
+          \ \"plot\")\n\n    # Creating the output directories \n    os.makedirs(eda_path,\
+          \ exist_ok=True)\n    os.makedirs(plot_path, exist_ok=True)\n    logger.info(f\"\
+          Created directories: {eda_path}, {plot_path}\")\n\n    # Generate EDA report\n\
+          \    profile = ProfileReport(df, title='EDA Report')\n    profile_report_path\
+          \ = os.path.join(os.path.dirname(eda), 'eda_report.html')\n    profile.to_file(profile_report_path)\n\
+          \    logger.info(f\"EDA report saved to {profile_report_path}\")\n    #\
+          \ joblib.dump(os.path.join(eda_path, 'eda_report.html'), eda)\n    # Save\
+          \ the EDA report path\n    # with open(eda, 'w') as eda_file:\n    #   \
+          \  eda_file.write(profile_report_path)\n    shutil.copyfile(profile_report_path,\
+          \ eda)\n\n    # Example visualization: Churn distribution\n    plt.figure(figsize=(10,\
+          \ 6))\n    sns.countplot(data=df, x='Churn')\n    plt.title('Churn Distribution')\n\
+          \n    # Save the plot to the specified output path\n    plot_file_path =\
+          \ os.path.join(plot_path, 'churn_distribution.png')\n    plt.savefig(plot_file_path)\n\
+          \    logger.info(f\"Plot saved to {plot_file_path}\")\n    # joblib.dump(plot_file_path,\
+          \ plot)\n    # Save the plot path\n    # with open(plot, 'w') as plot_file:\n\
+          \    #     plot_file.write(plot_file_path)\n    shutil.copyfile(plot_file_path,\
+          \ plot)\n    plt.close()\n\n"
+        image: python:3.11
     exec-data-ingestion:
       container:
         args:
@@ -84,7 +156,7 @@ deploymentSpec:
           \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
           \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.3'\
           \ 'requests==2.32.3' 'minio==7.2.15' 'sqlalchemy==2.0.38' 'pymysql==1.1.1'\
-          \ && \"$0\" \"$@\"\n"
+          \ 'psycopg2==2.9.10' && \"$0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -98,50 +170,72 @@ deploymentSpec:
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef data_ingestion(input_csv: str, api_endpoint: str, sql_details:\
           \ dict, output_csv: OutputPath('Dataset')) -> None:\n    import requests\n\
-          \    import pandas as pd\n    from sqlalchemy import create_engine\n   \
-          \ from minio import Minio\n    from io import StringIO\n\n    # Starting\
-          \ with an empty DataFrame\n    df = pd.DataFrame()  \n\n    # From API\n\
-          \    if api_endpoint:          \n        # Send a GET Request and handle\
-          \ Error\n        try:\n            response = requests.get(api_endpoint)\
-          \ \n        except Exception as e:\n            print(f\"An error occurred\
-          \ while sending GET request to {api_endpoint}: {e}\")\n\n        # If there's\
-          \ a response, then load it into Datafrom    \n        if response:  \n \
-          \           response.raise_for_status()\n            df_api = pd.DataFrame()\n\
-          \            df_api = pd.DataFrame(response.json())\n            if not\
-          \ df_api.empty:\n                print(\"Data from API => \", df_api.describe())\n\
-          \                # Merge all Dataframes into one\n                df = df_api\
-          \ if df.empty else pd.merge(df, df_api, on='key', how='inner') \n\n\n  \
-          \  # From SQL\n    if sql_details: \n        df_db = pd.DataFrame()    \
-          \    \n        # Create a SQL engine for connection\n        engine = create_engine(sql_details['connection_string'],\
-          \ \n                               pool_size=10,\n                     \
-          \          max_overflow=20, \n                               pool_timeout=30,\
-          \ \n                               pool_recycle=1800, \n               \
-          \                pool_pre_ping=True)\n\n        # Run query to capture the\
-          \ data and handle Errors\n        try:\n            df_db = pd.read_sql(sql_details['query'],\
-          \ engine)\n        except Exception as e:\n            print(f\"An error\
-          \ occurred while querying the Database: {e}\") \n\n        if not df_db.empty:\n\
-          \            print(\"Data from Database => \", df_db.describe())\n     \
-          \       # Merge all Dataframes into one\n            df = df_db if df.empty\
-          \ else pd.merge(df, df_db, on='key', how='inner') \n\n\n\n    # From CSV\
-          \ file (via Minio)\n    if input_csv:\n        df_minio = pd.DataFrame()\n\
-          \        downloaded_file = ''\n\n        # Create a minio client connection\n\
-          \        minio_client = Minio(endpoint=\"192.168.203.181:30900\",\n    \
-          \                         access_key=\"minioadmin\",\n                 \
-          \            secret_key=\"minioadmin\",\n                             secure=False)\
-          \        \n\n        # Download the Object and handle Errors\n        try:\n\
-          \            minio_client.fget_object(bucket_name=\"datasets\", \n     \
-          \                                object_name=input_csv,\n              \
-          \                       file_path='/tmp/dataset.csv')\n            downloaded_file\
-          \ = '/tmp/dataset.csv'\n        except Exception as e:\n               \
-          \ print(f\"An error occurred while downloading the file {input_csv}: {e}\"\
-          )\n\n        # If the CSV file is downloaded then load it into Datafrom\
-          \    \n        if downloaded_file:   \n            df_minio = pd.read_csv(downloaded_file)\n\
-          \            if not df_minio.empty:\n                print(\"Data from Minio\
-          \ => \", df_minio.describe())\n                # Merge all Dataframes into\
-          \ one\n                df = df_minio if df.empty else pd.merge(df, df_minio,\
-          \ on='key', how='inner')\n\n\n    if not df.empty:\n        df.reset_index(drop=True,\
-          \ inplace=True)\n        df.to_csv(output_csv, index=False)\n        print(\"\
-          Downloaded Data => \", df.describe())\n\n"
+          \    import pandas as pd\n    import psycopg2\n    from minio import Minio\n\
+          \    import logging\n    import time\n\n\n    def merge_dataframes(df1,\
+          \ df2):\n\n        common_columns = df1.columns.intersection(df2.columns)\n\
+          \        # Check if there is at least one COMMON Column to use as a Key\n\
+          \        if common_columns.empty:\n            logging.error(\"No common\
+          \ columns found to perform the merge.\")\n            logging.info(f\"\\\
+          n___Returning___\\n'{df1.info()}'\")\n            return df1\n\n       \
+          \ key = common_columns[0]\n        # Propagate Data Types from df1 to df2\
+          \ for common columns\n        for column in common_columns:\n          \
+          \  df2[column] = df2[column].astype(df1[column].dtype)\n            logging.info(f\"\
+          Converted column '{column}' in df2 to match df1's type ({df1[column].dtype})\"\
+          )\n\n        # Adding Missing Columns as None\n        for col in df2.columns:\n\
+          \            if col not in df1.columns:\n                df1[col] = None\n\
+          \        for col in df1.columns:\n            if col not in df2.columns:\n\
+          \                df2[col] = None\n\n        # Perform an Outer Merge\n \
+          \       # merged = pd.merge(df1, df2, on=key, how='outer')\n        # print(\"\
+          Performed outer merge\")\n\n        # Using combine_first to merge on index\n\
+          \        df1_indexed = df1.set_index(key)\n        df2_indexed = df2.set_index(key)\n\
+          \        merged = df1_indexed.combine_first(df2_indexed).reset_index()\n\
+          \n        return merged\n\n    # Create an empty Dataframe\n    df = pd.DataFrame()\n\
+          \n    # From API\n    if api_endpoint:\n        try:\n            response\
+          \ = requests.get(api_endpoint)\n            # response.raise_for_status()\n\
+          \            # Load JSON response into Datafrom\n            df_api = pd.DataFrame(response.json())\n\
+          \            if not df_api.empty:\n                logging.info(\"\\n___Data\
+          \ from API___\\n%s\", df_api.describe())\n                # Merge all Dataframes\
+          \ into one\n                df = df_api if df.empty else merge_dataframes(df_api,\
+          \ df)\n\n        except Exception as e:\n            logging.error(\"Error\
+          \ while fetching API data: %s\", e)\n\n    # From SQL  \n    if sql_details:\n\
+          \        retries = 3\n        while retries > 0:\n            try:\n   \
+          \             # Connect to the PostgreSQL database using psycopg2\n    \
+          \            conn = psycopg2.connect(\n                    host=sql_details['DB_HOST'],\n\
+          \                    port=sql_details['DB_PORT'],\n                    dbname=sql_details['DB_NAME'],\n\
+          \                    user=sql_details['DB_USER'],\n                    password=sql_details['DB_PASSWORD']\n\
+          \                )\n                cursor = conn.cursor()\n\n         \
+          \       # Execute the query and fetch the data into a DataFrame\n      \
+          \          cursor.execute(sql_details['query'])\n                # Fetch\
+          \ all rows from the executed query\n                data = cursor.fetchall()\n\
+          \                # Get column names from the cursor\n                colnames\
+          \ = [desc[0] for desc in cursor.description]\n                # Create DataFrame\
+          \ from the fetched data\n                df_db = pd.DataFrame(data, columns=colnames)\n\
+          \n                if not df_db.empty:\n                    logging.info(\"\
+          \\n___Data from Database___\\n %s\", df_db.describe())\n               \
+          \     # Merge all Dataframes into one\n                    df = df_db if\
+          \ df.empty else merge_dataframes(df_db, df)\n\n                # Close the\
+          \ cursor and connection\n                cursor.close()\n              \
+          \  conn.close()\n\n                # If successful, exit the loop\n    \
+          \            break\n            except Exception as e:\n               \
+          \ logging.error(\"Error while querying Database: %s - Retries left: %d\"\
+          , e, retries - 1)\n                retries -= 1\n                time.sleep(1)\
+          \  # wait and retrying\n\n    # From CSV via Minio\n    if input_csv:\n\
+          \        try:\n            minio_client = Minio(endpoint=\"192.168.203.181:30900\"\
+          ,\n                                 access_key=\"minioadmin\",\n       \
+          \                          secret_key=\"minioadmin\",\n                \
+          \                 secure=False)\n            minio_client.fget_object(bucket_name=\"\
+          datasets\",\n                                     object_name=input_csv,\n\
+          \                                     file_path='/tmp/dataset.csv')\n  \
+          \          # If the CSV file is downloaded then load it into Datafrom\n\
+          \            df_minio = pd.read_csv('/tmp/dataset.csv')\n            if\
+          \ not df_minio.empty:\n                logging.info(\"\\n___Data from Minio___\\\
+          n%s\", df_minio.describe())\n                # Merge all Dataframes into\
+          \ one\n                df = df_minio if df.empty else merge_dataframes(df_minio,\
+          \ df)\n\n        except Exception as e:\n            logging.error(\"Error\
+          \ downloading file from Minio: %s\", e)\n\n    if not df.empty:\n      \
+          \  df.reset_index(drop=True, inplace=True)\n        df.to_csv(output_csv,\
+          \ index=False)\n        logging.info(\"\\n___Downloaded and merged data___\\\
+          n%s\", df.describe())\n\n"
         image: python:3.11
     exec-data-processing:
       container:
@@ -158,7 +252,7 @@ deploymentSpec:
           \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
           \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
           \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.3'\
-          \ 'scikit-learn==1.6.1' && \"$0\" \"$@\"\n"
+          \ 'scikit-learn==1.6.1' 'imbalanced-learn==0.13.0' && \"$0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -172,34 +266,38 @@ deploymentSpec:
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef data_processing(input_csv: InputPath('Dataset'), processed_X:\
           \ OutputPath('Dataset'), processed_y: OutputPath('Dataset')) -> None:\n\
-          \    import pandas as pd\n    from sklearn.preprocessing import StandardScaler\n\
-          \    from sklearn.feature_selection import SelectKBest, f_classif\n    from\
-          \ sklearn.model_selection import train_test_split\n\n    df = pd.read_csv(input_csv)\n\
-          \    print(\"__________Data Information__________\")\n    print(df.info())\n\
-          \    print(\"__________Contract Length__________\")\n    print(df[\"Contract\
-          \ Length\"].value_counts())\n\n    # Feature selection and standardization\n\
-          \    gender_map = {'Male': 0, 'Female': 1}\n    subscription_map = {'Basic':\
-          \ 0, 'Premium': 1, 'Pro': 2}\n    Contract_Length = {'Annual': 0, 'Quarterly':\
-          \ 1, 'Monthly' : 2} \n\n    df['Gender'] = df['Gender'].map(gender_map)\n\
-          \    df['Subscription Type'] = df['Subscription Type'].map(subscription_map)\n\
-          \    df['Contract Length'] = df['Contract Length'].map(Contract_Length)\n\
-          \n    # Fill NaN values with the mode for each column\n    for column in\
-          \ df.columns:\n        df[column].fillna(df[column].mode()[0], inplace=True)\n\
-          \n    threshold = 0.03\n    correlation_matrix = df.corr()\n    high_corr_features\
-          \ = correlation_matrix.index[abs(correlation_matrix[\"Churn\"]) > threshold].tolist()\n\
-          \    high_corr_features.remove(\"Churn\")    \n    print(\"__________High\
-          \ Correlated Features__________\")\n    print(high_corr_features)\n\n  \
-          \  X_selected = df[high_corr_features]\n    y_selected = df[\"Churn\"]\n\
-          \n    print(\"__________X-Data Information__________\")\n    print(pd.DataFrame(X_selected).info())\n\
-          \    print(\"__________Y-Data Information__________\")\n    print(pd.Series(y_selected).info())\n\
-          \n    # # Select features\n    # selector = SelectKBest(score_func=f_classif,\
-          \ k=10)\n    # X_selected = selector.fit_transform(X, y)\n\n    # # Standardization\n\
-          \    # scaler = StandardScaler()\n    # X_scaled = scaler.fit_transform(X_selected)\n\
-          \n    # # Save the processed data to files\n    # pd.DataFrame(X_scaled).to_csv(processed_X,\
-          \ index=False)\n    # pd.Series(y).to_csv(processed_y, index=False)\n\n\
-          \    #Save the processed data to files    \n    pd.DataFrame(X_selected).to_csv(processed_X,\
-          \ index=False)\n    pd.Series(y_selected).to_csv(processed_y, index=False)\n\
-          \n"
+          \    import pandas as pd\n    from sklearn.impute import SimpleImputer\n\
+          \    from sklearn.preprocessing import StandardScaler, OneHotEncoder\n \
+          \   from sklearn.compose import ColumnTransformer\n    from imblearn.over_sampling\
+          \ import SMOTE\n    import numpy as np\n    import logging\n\n    logging.basicConfig(level=logging.INFO)\n\
+          \    df = pd.read_csv(input_csv)\n\n    # Data Imputation and Cleaning\n\
+          \    num_imputer = SimpleImputer(strategy='median')\n    cat_imputer = SimpleImputer(strategy='most_frequent')\n\
+          \n    # Separate numeric and categorical columns\n    numeric_cols = df.select_dtypes(include='number').columns\n\
+          \    categorical_cols = df.select_dtypes(include='object').columns\n\n \
+          \   # Impute missing values\n    df[numeric_cols] = num_imputer.fit_transform(df[numeric_cols])\n\
+          \    df[categorical_cols] = cat_imputer.fit_transform(df[categorical_cols])\n\
+          \n    logging.info(\"Unique values in 'Churn' before processing: %s\", df['Churn'].unique())\n\
+          \n    # Ensure 'Churn' is numeric\n    if df['Churn'].dtype == 'object':\n\
+          \        df['Churn'] = df['Churn'].map({'Yes': 1, 'No': 0})\n\n    # Drop\
+          \ rows where 'Churn' is NaN after mapping\n    df.dropna(subset=['Churn'],\
+          \ inplace=True)\n\n    logging.info(\"Unique values in 'Churn' after mapping:\
+          \ %s\", df['Churn'].unique())\n\n    # Feature Engineering\n    if 'CustomerID'\
+          \ in df.columns:\n        df = df.drop(columns=['CustomerID'])\n\n    #\
+          \ Separate features and target\n    X = df.drop(columns='Churn')\n    y\
+          \ = df['Churn']\n\n    # Verify no NaN values in the target variable\n \
+          \   if y.isnull().any():\n        logging.error(\"Target variable y contains\
+          \ NaN values after processing.\")\n        return\n\n    # Encode categorical\
+          \ columns using OneHotEncoder\n    categorical_cols = X.select_dtypes(include='object').columns\n\
+          \    numeric_cols = X.select_dtypes(include='number').columns\n\n    preprocessor\
+          \ = ColumnTransformer(\n        transformers=[\n            ('num', StandardScaler(),\
+          \ numeric_cols),\n            ('cat', OneHotEncoder(), categorical_cols)\n\
+          \        ]\n    )\n\n    # Transform the feature matrix\n    X_processed\
+          \ = preprocessor.fit_transform(X)\n\n    # Apply SMOTE for balancing\n \
+          \   smote = SMOTE(random_state=42)\n    X_resampled, y_resampled = smote.fit_resample(X_processed,\
+          \ y)\n\n    # Save processed data\n    pd.DataFrame(X_resampled).to_csv(processed_X,\
+          \ index=False)\n    pd.Series(y_resampled).to_csv(processed_y, index=False)\n\
+          \n    logging.info(\"Processed data saved with shapes: X: %s, y: %s\", X_resampled.shape,\
+          \ y_resampled.shape)\n\n"
         image: python:3.11
     exec-model-training:
       container:
@@ -216,7 +314,8 @@ deploymentSpec:
           \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
           \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
           \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.3'\
-          \ 'scikit-learn==1.6.1' 'joblib==1.4.2' && \"$0\" \"$@\"\n"
+          \ 'scikit-learn==1.6.1' 'joblib==1.4.2' 'mlflow==2.11.0' && \"$0\" \"$@\"\
+          \n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -229,32 +328,33 @@ deploymentSpec:
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef model_training(processed_X: InputPath('Dataset'), processed_y:\
-          \ InputPath('Dataset'), \n                      knn_model: OutputPath('Dataset'),\
+          \ InputPath('Dataset'), \n                   knn_model: OutputPath('Dataset'),\
           \ lg_model: OutputPath('Dataset'), svm_model: OutputPath('Dataset')) ->\
           \ None:\n    import pandas as pd\n    from sklearn.model_selection import\
           \ train_test_split\n    from sklearn.neighbors import KNeighborsClassifier\
           \    \n    from sklearn.linear_model import LogisticRegression\n    from\
-          \ sklearn.svm import SVC\n    from sklearn.metrics import accuracy_score,\
-          \ confusion_matrix, classification_report\n    import joblib\n\n    X_processed\
-          \ = pd.read_csv(processed_X)\n    y_processed = pd.read_csv(processed_y)\n\
+          \ sklearn.svm import SVC\n    from sklearn.metrics import accuracy_score\n\
+          \    import joblib\n    import mlflow\n    import mlflow.sklearn\n    import\
+          \ logging\n\n    # Start MLflow tracking\n    if mlflow.active_run():\n\
+          \        mlflow.end_run()\n\n    mlflow.start_run()\n\n    X_processed =\
+          \ pd.read_csv(processed_X)\n    y_processed = pd.read_csv(processed_y)\n\
           \n    X_train, X_test, y_train, y_test = train_test_split(X_processed, y_processed,\
-          \ test_size= 0.2 , shuffle=True, random_state=55)\n\n    print(\"__________X-Training\
-          \ Data Information__________\")\n    print(pd.DataFrame(X_train).info())\n\
-          \    print(\"__________Y-Training Data Information__________\")\n    print(pd.DataFrame(y_train).info())\n\
-          \n    #KNN Model \n    knn = KNeighborsClassifier(n_neighbors=3)\n    knn.fit(X_train,\
-          \ y_train)\n    y_pred_knn = knn.predict(X_test)\n    accuracy = accuracy_score(y_test,\
-          \ y_pred_knn)\n    print(\"__________KNN Accuracy Score__________\")\n \
-          \   print(f'Accuracy: {accuracy * 100:.2f}%')    \n    print(\"__________KNN\
-          \ Classification Report__________\")\n    print(classification_report(y_test,\
-          \ y_pred_knn))\n    # Save the trained model\n    joblib.dump(knn, knn_model)\n\
-          \n    #Logistic Regression\n    lg = LogisticRegression(max_iter=1000, random_state=42)\n\
-          \    lg.fit(X_train, y_train)\n    y_pred_lg = lg.predict(X_test)\n    print(\"\
-          __________LR Accuracy Score__________\")\n    print(accuracy_score(y_test,\
-          \ y_pred_lg))\n    # Save the trained model\n    joblib.dump(lg, lg_model)\n\
-          \n    #SVM \n    svm = SVC()\n    svm.fit(X_train, y_train)\n    y_pred_svm\
-          \ = svm.predict(X_test)\n    print(\"__________SVM Accuracy Score__________\"\
-          )\n    print(accuracy_score(y_test, y_pred_svm))\n    # Save the trained\
-          \ model\n    joblib.dump(svm, svm_model)\n\n"
+          \ test_size=0.2, random_state=55)\n\n    # KNN Model\n    knn = KNeighborsClassifier(n_neighbors=3)\n\
+          \    knn.fit(X_train, y_train)\n    y_pred_knn = knn.predict(X_test)\n \
+          \   knn_accuracy = accuracy_score(y_test, y_pred_knn)\n    logging.info(\"\
+          KNN Accuracy: %.2f\", knn_accuracy * 100)\n    joblib.dump(knn, knn_model)\n\
+          \    mlflow.log_metric(\"KNN Accuracy\", knn_accuracy)\n    mlflow.sklearn.log_model(knn,\
+          \ \"knn_model\")\n\n    # Logistic Regression\n    lg = LogisticRegression(max_iter=1000,\
+          \ random_state=42)\n    lg.fit(X_train, y_train)\n    y_pred_lg = lg.predict(X_test)\n\
+          \    lg_accuracy = accuracy_score(y_test, y_pred_lg)\n    logging.info(\"\
+          Logistic Regression Accuracy: %.2f\", lg_accuracy * 100)\n    joblib.dump(lg,\
+          \ lg_model)\n    mlflow.log_metric(\"Logistic Regression Accuracy\", lg_accuracy)\n\
+          \    mlflow.sklearn.log_model(lg, \"lg_model\")\n\n    # SVM\n    svm =\
+          \ SVC()\n    svm.fit(X_train, y_train)\n    y_pred_svm = svm.predict(X_test)\n\
+          \    svm_accuracy = accuracy_score(y_test, y_pred_svm)\n    logging.info(\"\
+          SVM Accuracy: %.2f\", svm_accuracy * 100)\n    joblib.dump(svm, svm_model)\n\
+          \    mlflow.log_metric(\"SVM Accuracy\", svm_accuracy)\n    mlflow.sklearn.log_model(svm,\
+          \ \"svm_model\")\n\n    # End MLflow run\n    mlflow.end_run()\n\n"
         image: python:3.11
 pipelineInfo:
   description: A pipeline to perform customer churn prediction.
@@ -262,6 +362,21 @@ pipelineInfo:
 root:
   dag:
     tasks:
+      data-eda:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-data-eda
+        dependentTasks:
+        - data-ingestion
+        inputs:
+          artifacts:
+            input_csv:
+              taskOutputArtifact:
+                outputArtifactKey: output_csv
+                producerTask: data-ingestion
+        taskInfo:
+          name: data-eda
       data-ingestion:
         cachingOptions:
           enableCache: true
